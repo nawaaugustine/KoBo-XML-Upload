@@ -1,80 +1,96 @@
 import json
-import logging
 import pandas as pd
 import requests
-from lxml import etree as ET
+import xml.etree.ElementTree as ET
 
+# Load the configuration file.
 def load_config(config_file):
     """
-    Load and validate the JSON configuration file.
+    Load the JSON configuration file and return the configuration dictionary.
+    
+    Args:
+        config_file (str): Path to the JSON configuration file.
+
+    Returns:
+        dict: Configuration dictionary.
     """
-    try:
-        with open(config_file, 'r') as f:
-            config = json.load(f)
-    except FileNotFoundError as e:
-        logging.error(f"Configuration file not found: {e}")
-        raise
-
-    required_keys = ['parent_data_path', 'api_token', 'project_uuid']
-    for key in required_keys:
-        if key not in config:
-            logging.error(f"Missing required key in configuration: {key}")
-            raise ValueError(f"Missing required key in configuration: {key}")
-
+    with open(config_file, 'r') as f:
+        config = json.load(f)
     return config
 
+# Process the submission data and create an XML tree structure.
 def process_submission(row, project_uuid):
     """
-    Create an XML tree structure for the given row and project_uuid.
-    """
-    root = ET.Element('data', {
-        'id': project_uuid,
-        'xmlns:orx': 'http://openrosa.org/xforms',
-        'xmlns:jr': 'http://openrosa.org/javarosa'
-    })
+    Create an XML tree structure for the given row, matching_rows, and project_uuid.
+    Add various elements to the XML tree based on the input data and return the root
+    of the XML tree.
 
-    root.extend([
-        ET.Element('POR', text=str(row['POR'])),
-        ET.Element('start_date', text=str(row['start_date'])),
-        ET.Element('Amount', text=str(row['Amount'])),
-        ET.Element('meta', {
-            'instanceID': project_uuid
-        })
-    ])
+    Args:
+        row (pd.Series): A row from the parent dataframe.
+        matching_rows (pd.DataFrame): Matching rows from the child dataframe.
+        project_uuid (str): The project UUID.
+
+    Returns:
+        xml.etree.ElementTree.Element: Root of the XML tree structure.
+    """
+    
+    root = ET.Element('data')
+    root.set('id', project_uuid)
+    root.set('xmlns:orx', 'http://openrosa.org/xforms')
+    root.set('xmlns:jr', 'http://openrosa.org/javarosa')
+
+    # set root level elements
+    #ET.SubElement(root, 'start').text = str(row['start'])
+    #ET.SubElement(root, 'end').text = str(row['end'])
+    #ET.SubElement(root, 'today').text = str(row['today'])
+   
+    ET.SubElement(root, 'POR').text = str(row['POR'])
+    ET.SubElement(root, 'start_date').text = str(row['start_date'])
+    ET.SubElement(root, 'Amount').text = str(row['Amount'])
+
+    
+    # Although kobo may accept the submission without this meta element it is highly recommended by openrosa
+    meta = ET.SubElement(root, 'meta')
+    meta_instanceID = ET.SubElement(meta, 'instanceID')
+    meta_instanceID.text = project_uuid
 
     return root
 
-def post_submission(xml_root, endpoint, headers):
+# Main function that drives the script.
+def main():
     """
-    Post the XML submission data to the KoBoToolbox server.
+    Main function that reads Excel data into Pandas dataframes, iterates through
+    the rows, creates XML entries, and posts them to the KoBoToolbox server.
+
+    Steps:
+    1. Load the configuration from the 'config.json' file.
+    2. Read Excel data into Pandas dataframes for parent and child data.
+    3. Construct the endpoint URL and headers for API requests to KoBoToolbox.
+    4. Iterate through the rows in the parent dataframe, find the matching rows 
+       in the child dataframe, and process the submissions by creating XML entries.
+    5. Send the XML submission data to the KoBoToolbox server using HTTP POST requests.
+    6. Print the submission status and response from the server.
     """
-    xml_string = ET.tostring(xml_root, encoding='utf-8', pretty_print=True)
-    payload = {'xml_submission_file': ('data.xml', xml_string, 'text/xml')}
-    try:
-        response = requests.post(endpoint, headers=headers, files=payload)
-        response.raise_for_status()
-    except requests.RequestException as e:
-        logging.error(f"Failed to post submission: {e}")
-        raise
-
-def setup_logging():
-    logging.basicConfig(level=logging.INFO,
-                        format='%(asctime)s - %(levelname)s - %(message)s')
-
-def main(config_file='config.json'):
-    setup_logging()
+        
+    config = load_config('config.json')
     
-    config = load_config(config_file)
-    df_root = pd.read_excel(config['parent_data_path'], chunksize=100)
+    #loads excel data into pandas dataframe
+    df_root = pd.read_excel(config['parent_data_path'])
 
     endpoint = 'https://kobocat.unhcr.org/api/v1/submissions'
     headers = {'Authorization': f"Token {config['api_token']}"}
 
-    for chunk in df_root:
-        for i, row in chunk.iterrows():
-            xml_root = process_submission(row, config['project_uuid'])
-            post_submission(xml_root, endpoint, headers)
-            logging.info(f'Successfully submitted row {i}')
+    # Iterate, create and post xml entry to KoBo
+    for i, row in df_root.iterrows():
+        root = process_submission(row, config['project_uuid'])
 
+        xml_string = ET.tostring(root, encoding='utf-8', method='xml')
+ 
+        payload = {'xml_submission_file': ('data.xml', xml_string, 'text/xml')}
+        response = requests.post(endpoint, headers=headers, files=payload)
+
+        print(f'Submission {i}: {response.status_code} {response.text}')
+
+# Entry point for the script.
 if __name__ == '__main__':
     main()
