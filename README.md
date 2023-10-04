@@ -11,13 +11,13 @@ The script is designed to read data from an Excel file, convert each row of data
 Clone the repository to your local machine:
 
 ```bash
-git clone https://github.com/your-username/your-repo.git
+git clone https://github.com/nawaaugustine/KoBo-XML-Upload.git
 ```
 
 Navigate to the project directory:
 
 ```bash
-cd your-repo
+cd KoBo XML Upload
 ```
 
 Install the required dependencies using pip:
