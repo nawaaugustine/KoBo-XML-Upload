@@ -121,47 +121,78 @@ def create_repeat_group_payload(parent_record, child_df, filter_column, field_ma
         group_payload.append(child_entry)
     return group_payload
 
-def build_repeat_groups_payload(parent_record, groups_config):
+def process_repeat_groups_config_recursive(repeat_groups_config):
     """
-    Builds the repeat groups payload preserving any outer group structure.
+    Recursively processes the repeat groups configuration to load the Excel data and preserve nested structure.
+    
+    If a configuration item has a "data_path" key, it's treated as a leaf group.
+    Otherwise, it is assumed to be a container for nested group configurations.
+    
+    Args:
+        repeat_groups_config (dict): The raw repeat groups configuration from JSON.
+        
+    Returns:
+        dict: A processed configuration dictionary where each leaf group is loaded with data and
+              each non-leaf group preserves its nested structure.
+    """
+    processed = {}
+    for key, value in repeat_groups_config.items():
+        if isinstance(value, dict):
+            if "data_path" in value:
+                # Leaf group: load its data from Excel.
+                try:
+                    child_df = pd.read_excel(value["data_path"])
+                    processed[key] = {
+                        "data": child_df,
+                        "filter_column": value.get("filter_column", "Parent_ID"),
+                        "fields": value["fields"]
+                    }
+                except Exception as e:
+                    logging.error(f"Failed to load repeat group '{key}' data: {e}")
+            else:
+                # Non-leaf group: process nested groups recursively.
+                nested = process_repeat_groups_config_recursive(value)
+                if nested:
+                    processed[key] = nested
+        else:
+            logging.warning(f"Skipping invalid repeat group configuration for key: {key}")
+    return processed
+
+def build_repeat_groups_payload_recursive(parent_record, groups_config):
+    """
+    Recursively builds the payload for repeat groups, preserving any nested structure.
     
     Args:
         parent_record (pd.Series): The parent record.
-        groups_config (dict): Processed repeat groups configuration. This can be a mix of:
-            - Leaf group configs (with keys: "data", "filter_column", "fields")
-            - Outer groups (dictionaries of nested group configs)
-            
+        groups_config (dict): Processed repeat groups configuration with unlimited nesting.
+        
     Returns:
-        dict: The dictionary to be merged into the final payload submission.
+        dict: The dictionary to be merged into the final submission payload.
     """
-    groups_payload = {}
-    for group_key, group_config in groups_config.items():
-        # If "data" is a key, this is a leaf group config.
-        if isinstance(group_config, dict) and "data" in group_config:
-            child_df = group_config["data"]
-            filter_column = group_config.get("filter_column", "Parent_ID")
-            fields_mapping = group_config["fields"]
-            groups_payload[group_key] = create_repeat_group_payload(parent_record, child_df, filter_column, fields_mapping)
+    payload = {}
+    for key, value in groups_config.items():
+        if isinstance(value, dict) and "data" in value:
+            # Leaf group node.
+            child_df = value["data"]
+            filter_column = value.get("filter_column", "Parent_ID")
+            fields_mapping = value["fields"]
+            payload[key] = create_repeat_group_payload(parent_record, child_df, filter_column, fields_mapping)
+        elif isinstance(value, dict):
+            # Non-leaf node: recursively process nested groups.
+            payload[key] = build_repeat_groups_payload_recursive(parent_record, value)
         else:
-            # Otherwise, we assume this is an outer group containing nested groups.
-            nested_payload = {}
-            for nested_key, nested_config in group_config.items():
-                child_df = nested_config["data"]
-                filter_column = nested_config.get("filter_column", "Parent_ID")
-                fields_mapping = nested_config["fields"]
-                nested_payload[nested_key] = create_repeat_group_payload(parent_record, child_df, filter_column, fields_mapping)
-            groups_payload[group_key] = nested_payload
-    return groups_payload
+            logging.warning(f"Invalid configuration for group '{key}', skipping.")
+    return payload
 
 def create_payload(parent_record, groups_config, project_uuid, formhub_uuid, form_version):
     """
     Creates the complete payload for API submission including repeat groups.
     
-    The payload preserves outer groups if defined in the configuration.
+    The payload preserves the nested group structure as defined in the configuration.
     
     Args:
         parent_record (pd.Series): The parent record.
-        groups_config (dict): Processed repeat groups configuration.
+        groups_config (dict): Processed repeat groups configuration with unlimited nesting.
         project_uuid (str): The project UUID.
         formhub_uuid (str): The formhub UUID.
         form_version (str): The form version.
@@ -169,7 +200,7 @@ def create_payload(parent_record, groups_config, project_uuid, formhub_uuid, for
     Returns:
         dict: The complete payload to be submitted.
     """
-    groups_payload = build_repeat_groups_payload(parent_record, groups_config)
+    groups_payload = build_repeat_groups_payload_recursive(parent_record, groups_config)
     payload = {
         "id": project_uuid,
         "submission": {
@@ -178,72 +209,17 @@ def create_payload(parent_record, groups_config, project_uuid, formhub_uuid, for
             "Family_ID": safe_str(parent_record["Family_ID"]),
             **groups_payload,
             "__version__": form_version,
-            "meta": {
-                "instanceID": f"uuid:{safe_str(uuid.uuid4())}"
-            }
+            "meta": {"instanceID": f"uuid:{safe_str(uuid.uuid4())}"}
         }
     }
     return payload
 
-def process_repeat_groups_config(repeat_groups_config):
-    """
-    Processes the repeat groups configuration to load the Excel data and preserve 
-    any outer group structure.
-    
-    If a configuration item has a "data_path" key, it is treated as a leaf group.
-    Otherwise, it is assumed to be an outer group containing nested group configurations.
-    
-    Args:
-        repeat_groups_config (dict): The raw repeat groups configuration from the JSON.
-        
-    Returns:
-        dict: A processed dictionary where each leaf group includes:
-            - 'data': Loaded DataFrame.
-            - 'filter_column': Filter column (defaults to "Parent_ID").
-            - 'fields': Mapping of API field names to DataFrame columns.
-          And any outer group is preserved as a nested dictionary.
-    """
-    processed = {}
-    for key, value in repeat_groups_config.items():
-        if isinstance(value, dict) and "data_path" in value:
-            # Leaf group defined at top level.
-            try:
-                child_df = pd.read_excel(value["data_path"])
-                processed[key] = {
-                    "data": child_df,
-                    "filter_column": value.get("filter_column", "Parent_ID"),
-                    "fields": value["fields"]
-                }
-            except Exception as e:
-                logging.error(f"Failed to load repeat group '{key}' data: {e}")
-        elif isinstance(value, dict):
-            # Outer group: process nested groups.
-            outer = {}
-            for nested_key, nested_value in value.items():
-                if isinstance(nested_value, dict) and "data_path" in nested_value:
-                    try:
-                        child_df = pd.read_excel(nested_value["data_path"])
-                        outer[nested_key] = {
-                            "data": child_df,
-                            "filter_column": nested_value.get("filter_column", "Parent_ID"),
-                            "fields": nested_value["fields"]
-                        }
-                    except Exception as e:
-                        logging.error(f"Failed to load nested repeat group '{nested_key}' under outer group '{key}': {e}")
-                else:
-                    logging.warning(f"Skipping invalid nested group configuration for key: {nested_key} under outer group {key}")
-            if outer:
-                processed[key] = outer
-        else:
-            logging.warning(f"Skipping invalid repeat group configuration for key: {key}")
-    return processed
-
 def main():
     """
-    Main function: loads configuration and data, processes repeat group configurations,
+    Main function: loads configuration and data, processes the repeat group configuration recursively,
     builds payloads, and sends API requests.
     
-    Supports both flat and nested (with preserved outer groups) repeat group configurations.
+    Supports unlimited (arbitrarily deep) nesting of repeat groups.
     """
     configure_logging()
     config_data = load_config('./config/config.json')
@@ -255,11 +231,11 @@ def main():
         logging.error(f"Failed to load parent data: {e}")
         return
 
-    # Process repeat groups if defined.
+    # Process repeat groups from configuration.
     if "repeat_groups" in config_data:
-        repeat_groups = process_repeat_groups_config(config_data["repeat_groups"])
+        repeat_groups = process_repeat_groups_config_recursive(config_data["repeat_groups"])
     else:
-        # Fallback: use a single repeat group from 'child_data_path' with a default mapping.
+        # Fallback: single repeat group from 'child_data_path' with default mapping.
         try:
             child_df = pd.read_excel(config_data['child_data_path'])
             repeat_groups = {
